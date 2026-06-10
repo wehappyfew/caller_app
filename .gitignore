@@ -2,23 +2,56 @@
 .env
 .env.*
 !.env.example
+*.pem
+credentials.json
+secrets.json
+service-account*.json
 
 # Local Python environment
 .venv/
+venv/
+env/
+.Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+pip-log.txt
 
-# Generated call audio (created at runtime)
-static/generated/*.mp3
+# Generated / runtime files
+static/generated/*
+!static/generated/.gitkeep
+static/tts/
+*.log
+*.mp3
+*.wav
 
-# OS / editor
+# OS junk
 .DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 
-# Cursor / editor tooling (not part of this app)
+# Cursor / Continue / agent tooling (not part of this app)
+.cursor/
 .agents/
 .continue/
 skills-lock.json
