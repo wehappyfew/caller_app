@@ -1,0 +1,3 @@
+name,phone,birthday,language,timezone,opt_in,opt_out,last_called_at,notes
+Test Friend,+12025550101,1990-03-31,el,Europe/Athens,true,false,,Example row — replace with real test numbers
+Backup Friend,+12025550102,1994-10-15,en,Europe/Athens,true,false,,Example row — use numbers you are allowed to call
