@@ -1,3 +1,9 @@
-name,phone,birthday,language,timezone,opt_in,opt_out,last_called_at,notes
-Test Friend,+12025550101,1990-03-31,el,Europe/Athens,true,false,,Example row — replace with real test numbers
-Backup Friend,+12025550102,1994-10-15,en,Europe/Athens,true,false,,Example row — use numbers you are allowed to call
+name,phone,language,timezone,last_called_at,notes
+Me,+306972813080,el,Europe/Athens,,
+Marina,+306946424153,el,Europe/Athens,,
+Panos,+306970417084,el,Europe/Athens,,
+Kontraros,+306977894337,el,Europe/Athens,,
+
+Paulou,+3069,el,Europe/Athens,,
+Aderfara,+3069,el,Europe/Athens,,
+Zaxaraki,+3069,el,Europe/Athens,,

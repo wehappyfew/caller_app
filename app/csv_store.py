@@ -1,15 +1,11 @@
 import csv
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from app.models import Contact
 
 
-def _parse_bool(value: str, default: bool) -> bool:
-    if value is None or value == "":
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y"}
+class ContactSelectionError(Exception):
+    """Raised when no contact can be selected for an outbound call."""
 
 
 def load_contacts(csv_path: str) -> list[Contact]:
@@ -25,11 +21,8 @@ def load_contacts(csv_path: str) -> list[Contact]:
                 Contact(
                     name=(row.get("name") or "").strip(),
                     phone=(row.get("phone") or "").strip(),
-                    birthday=(row.get("birthday") or "").strip(),
                     language=(row.get("language") or "el").strip() or "el",
                     timezone=(row.get("timezone") or "Europe/Athens").strip() or "Europe/Athens",
-                    opt_in=_parse_bool(row.get("opt_in"), True),
-                    opt_out=_parse_bool(row.get("opt_out"), False),
                     last_called_at=(row.get("last_called_at") or "").strip(),
                     notes=(row.get("notes") or "").strip(),
                 )
@@ -37,14 +30,32 @@ def load_contacts(csv_path: str) -> list[Contact]:
     return contacts
 
 
-def is_birthday_today(contact: Contact, default_timezone: str) -> bool:
-    tz_name = contact.timezone or default_timezone
-    now = datetime.now(ZoneInfo(tz_name))
-    try:
-        bday = datetime.fromisoformat(contact.birthday)
-    except ValueError:
-        return False
-    return now.month == bday.month and now.day == bday.day
+def contact_by_name(contacts: list[Contact], name: str) -> Contact | None:
+    target = name.strip().lower()
+    for contact in contacts:
+        if contact.name.strip().lower() == target:
+            return contact
+    return None
+
+
+def resolve_contact_to_call(csv_path: str, contact_name: str | None) -> Contact:
+    """Pick a contact by name from the CSV."""
+    if not contact_name or not contact_name.strip():
+        raise ContactSelectionError(
+            "No contact specified. Use --contact NAME or set CALL_CONTACT in .env."
+        )
+
+    contacts = load_contacts(csv_path)
+    if not contacts:
+        raise ContactSelectionError("CSV has no contacts.")
+
+    match = contact_by_name(contacts, contact_name)
+    if not match:
+        available = ", ".join(c.name for c in contacts if c.name) or "(none)"
+        raise ContactSelectionError(
+            f"Contact '{contact_name.strip()}' not found. Available: {available}"
+        )
+    return match
 
 
 def contact_by_phone(contacts: list[Contact], phone: str) -> Contact | None:
@@ -53,14 +64,3 @@ def contact_by_phone(contacts: list[Contact], phone: str) -> Contact | None:
         if contact.phone.replace(" ", "") == normalized:
             return contact
     return None
-
-
-def birthdays_for_today(csv_path: str, default_timezone: str) -> list[Contact]:
-    contacts = load_contacts(csv_path)
-    result: list[Contact] = []
-    for contact in contacts:
-        if not contact.opt_in or contact.opt_out:
-            continue
-        if is_birthday_today(contact, default_timezone):
-            result.append(contact)
-    return result

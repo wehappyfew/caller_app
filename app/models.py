@@ -6,11 +6,8 @@ from datetime import datetime
 class Contact:
     name: str
     phone: str
-    birthday: str
     language: str = "el"
     timezone: str = "Europe/Athens"
-    opt_in: bool = True
-    opt_out: bool = False
     last_called_at: str = ""
     notes: str = ""
 

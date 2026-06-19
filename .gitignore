@@ -34,6 +34,8 @@ pip-log.txt
 static/generated/*
 !static/generated/.gitkeep
 static/tts/
+call_logs/*
+!call_logs/.gitkeep
 *.log
 *.mp3
 *.wav
@@ -55,3 +57,6 @@ Desktop.ini
 .agents/
 .continue/
 skills-lock.json
+
+# Data
+data/contacts.csv
