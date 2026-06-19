@@ -28,7 +28,7 @@ You trigger calls manually — nothing runs on a schedule yet.
 | **`run_calls.py`** | A short Python script you run by hand | Finds the active contact and tells Twilio to start calling |
 | **`app/main.py`** | FastAPI web server | Handles `/voice/inbound` webhook and the `/media-stream` WebSocket |
 | **`app/twilio_audio_interface.py`** | Audio bridge | Forwards μ-law 8 kHz audio between Twilio and ElevenLabs |
-| **`app/csv_store.py`** | CSV reader | Loads contacts and checks call schedule |
+| **`app/csv_store.py`** | CSV reader | Loads contacts and resolves `--contact` / `CALL_CONTACT` by name |
 | **`app/twilio_client.py`** | Twilio helper | Builds the API client, watches call status, ring timeout |
 | **`.env`** | Secret config file (not in git) | API keys, agent ID, phone number, public URL |
 | **Twilio** | Cloud phone service | Places calls and ships audio over a WebSocket (Media Streams) |
@@ -78,7 +78,7 @@ cp .env.example .env
 cp data/contacts.csv.example data/contacts.csv
 ```
 
-`data/contacts.csv` is gitignored (it holds real phone numbers). Edit your local copy after copying from the example.
+`data/contacts.csv` is gitignored (it holds real phone numbers). Copy from the example and edit your local copy — see [Contacts file](#contacts-file-datacontactscsv) below.
 
 Then edit `.env` and fill in real values:
 
@@ -143,34 +143,93 @@ Create keys in [Twilio Console → API Keys](https://console.twilio.com/us1/acco
 
 **Account Auth Token (alternative)** — omit `TWILIO_API_KEY_SID` and put the Auth Token from [Account Info](https://console.twilio.com/) in `TWILIO_AUTH_TOKEN`.
 
-Phone numbers in the CSV must use **E.164** format: country code + number, with a `+` at the start.
+Phone numbers must use **E.164** format: country code + number, with a `+` at the start.
 
-- Good: `+306972813080`
-- Bad: `00306972813080` or `6972813080`
+- Good: `+306912345678`
+- Bad: `00306912345678` or `6912345678`
 
-### Choosing which number to call
+---
 
-**Recommended:** pass the contact `name` from the CSV:
+## Contacts file (`data/contacts.csv`)
+
+The contact list defines **who you can call**. Each `run_calls.py` run dials **one** person, chosen by the `name` column.
+
+### Create your file from the example
+
+The repo ships a template at `data/contacts.csv.example` (committed to git, placeholder numbers only). Your real list lives in `data/contacts.csv` (gitignored).
+
+```bash
+cp data/contacts.csv.example data/contacts.csv
+```
+
+Open `data/contacts.csv` in any spreadsheet editor or text editor. **Replace every placeholder `+3069` phone** with a full E.164 number before placing calls. The example names (`Me`, `Marina`, `Panos`, …) are only suggestions — add, rename, or remove rows as you like, but **keep the header row unchanged**.
+
+Example template (`data/contacts.csv.example`):
+
+```csv
+name,phone,language,timezone,last_called_at,notes
+Me,+3069,el,Europe/Athens,,
+Marina,+3069,el,Europe/Athens,,
+Panos,+3069,el,Europe/Athens,,
+```
+
+After editing (real numbers, optional notes):
+
+```csv
+name,phone,language,timezone,last_called_at,notes
+Me,+306912345678,el,Europe/Athens,,
+Marina,+306912345679,el,Europe/Athens,,
+Kontraros,+306912345680,el,Europe/Athens,,"prefers short calls"
+```
+
+| File | In git? | Purpose |
+|------|---------|---------|
+| `data/contacts.csv.example` | Yes | Safe template; copy this when setting up or resetting |
+| `data/contacts.csv` | No | Your working contact list with real phone numbers |
+
+To use a different path, set `CSV_PATH` in `.env`.
+
+### Columns
+
+Header (required, first line):
+
+`name,phone,language,timezone,last_called_at,notes`
+
+| Column | Required | Purpose |
+|--------|----------|---------|
+| **name** | Yes | Lookup key for `--contact` / `CALL_CONTACT` (case-insensitive, e.g. `Marina` matches `marina`) |
+| **phone** | Yes | Number Twilio dials in E.164 (`+30…`, `+1…`, …) |
+| **language** | No | `el` (Greek) or `en` (English); passed to the agent (default `el` if blank) |
+| **timezone** | No | IANA timezone on the contact row (default `Europe/Athens` if blank) |
+| **last_called_at** | No | Loaded from CSV but **not used** by the app today; leave empty or for your own tracking |
+| **notes** | No | Free text passed to the agent as `{{notes}}` (e.g. extra context for the persona) |
+
+Parking report fields (`location`, plate, color, brand) are **not** in the CSV — they come from `.env` / `run_calls.py` flags (`--location`, `--plate`, …).
+
+### Pick who to call
+
+Pass the contact **name** (not the phone number):
 
 ```bash
 python run_calls.py --contact Marina
 ```
 
-Or set a default in `.env`:
+Or set a default in `.env` so you can run `python run_calls.py` without the flag:
 
 ```env
 CALL_CONTACT=Marina
 ```
 
-Then `python run_calls.py` uses that name. One of `--contact` or `CALL_CONTACT` is required.
+One of `--contact` or `CALL_CONTACT` is required. If the name is missing or not found, the script exits and prints the **available names** from your CSV.
 
-Example `data/contacts.csv`:
+### What the app reads from each row
 
-```csv
-name,phone,language,timezone,last_called_at,notes
-Me,+306972813080,el,Europe/Athens,,
-Marina,+306946424153,el,Europe/Athens,,
-```
+| Step | What happens |
+|------|----------------|
+| **`run_calls.py`** | Resolves `name` → `phone`, stashes report details and a random agent ID, tells Twilio to dial |
+| **`/voice/inbound`** | When the callee answers, looks up the row again **by phone** to set `contact_name`, `language`, and `notes` for the ElevenLabs agent |
+
+So the `name` you pass on the CLI must match a row in `data/contacts.csv`, and that row’s `phone` must be the number you intend to ring.
 
 ---
 
@@ -377,19 +436,6 @@ The free URL changes every restart — that is why you update `PUBLIC_BASE_URL` 
 | `make call` | Run `run_calls.py` |
 | `make sync-agent` | Push prompt/LLM from `.env` + `prompts/` to ElevenLabs |
 | `make health` | Ping `/health` (server must already be running) |
-
----
-
-## CSV columns (contacts file)
-
-Header row:
-
-`name,phone,language,timezone,last_called_at,notes`
-
-- **name** — used with `--contact` / `CALL_CONTACT` (case-insensitive match)
-- **phone** — E.164 number Twilio dials (`+30…`)
-- **language** — `el` (Greek) or `en` (English); passed to the agent as a dynamic variable
-- **notes** — free text; passed to the agent so it can personalize
 
 ---
 
