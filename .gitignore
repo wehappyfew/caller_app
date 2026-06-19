@@ -58,5 +58,5 @@ Desktop.ini
 .continue/
 skills-lock.json
 
-# Data
+# Local contact list (real phone numbers — use data/contacts.csv.example as template)
 data/contacts.csv

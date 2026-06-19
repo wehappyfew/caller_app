@@ -75,7 +75,10 @@ Run this once.
 cd caller_app
 make setup
 cp .env.example .env
+cp data/contacts.csv.example data/contacts.csv
 ```
+
+`data/contacts.csv` is gitignored (it holds real phone numbers). Edit your local copy after copying from the example.
 
 Then edit `.env` and fill in real values:
 
