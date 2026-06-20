@@ -24,6 +24,7 @@ class Settings(BaseSettings):
         default="gemini-2.5-flash", alias="ELEVENLABS_AGENT_LLM"
     )
     elevenlabs_agent_language: str = Field(default="el", alias="ELEVENLABS_AGENT_LANGUAGE")
+    prompt_scenario: str = Field(default="parking_report", alias="PROMPT_SCENARIO")
     elevenlabs_agent_prompt_path: str = Field(
         default="prompts/worried_citizen_system.txt",
         alias="ELEVENLABS_AGENT_PROMPT_PATH",

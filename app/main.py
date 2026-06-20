@@ -16,12 +16,14 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from app.call_costs import build_call_cost_summary, log_call_cost_summary
 from app.agent_config import build_conversation_init, sync_agent_from_settings
 from app.agent_profiles import format_agent_label
-from app.agent_context import pop_agent_for_phone
+from app.agent_context import agent_ids_from_settings, pop_agent_for_phone, resolve_agent_id
 from app.call_log import CallTranscriptLogger
 from app.config import get_settings
 from app.csv_store import contact_by_phone, load_contacts
 from app.models import CallSession
-from app.report_context import pop_report_for_phone, report_from_stream_params
+from app.outbound_context import resolve_inbound_context
+from app.prompt_scenarios import get_scenario
+from app.report_context import report_from_stream_params
 from app.twilio_audio_interface import TwilioAudioInterface
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -73,8 +75,11 @@ def voice_inbound(
     language = contact.language if contact else "en"
     notes = contact.notes if contact else ""
 
-    report = pop_report_for_phone(to_number, settings)
-    if report.missing_fields():
+    scenario_id, agent_id, report = resolve_inbound_context(
+        request, to_number, settings
+    )
+    scenario = get_scenario(scenario_id)
+    if scenario.requires_report and report.missing_fields():
         logger.error(
             "Inbound call %s rejected: %s",
             call_sid,
@@ -83,8 +88,6 @@ def voice_inbound(
         vr = VoiceResponse()
         vr.hangup()
         return Response(content=str(vr), media_type="application/xml")
-
-    agent_id = pop_agent_for_phone(to_number, settings)
 
     SESSIONS[call_sid] = CallSession(
         call_sid=call_sid,
@@ -103,14 +106,16 @@ def voice_inbound(
     stream.parameter(name="notes", value=notes)
     for key, value in report.as_stream_parameters().items():
         stream.parameter(name=key, value=value)
+    stream.parameter(name="prompt_scenario", value=scenario_id)
     stream.parameter(name="agent_id", value=agent_id)
     vr.append(connect)
     logger.info(
-        "Inbound call %s -> %s (%s, %s) plate=%s agent=%s",
+        "Inbound call %s -> %s (%s, %s) scenario=%s plate=%s agent=%s",
         call_sid,
         name,
         to_number,
         language,
+        scenario_id,
         report.plate,
         format_agent_label(agent_id),
     )
@@ -127,6 +132,7 @@ async def media_stream(websocket: WebSocket) -> None:
     language = "en"
     notes = ""
     report = None
+    scenario_id = settings.prompt_scenario
     agent_id = ""
     call_sid: str | None = None
     transcript: CallTranscriptLogger | None = None
@@ -143,26 +149,36 @@ async def media_stream(websocket: WebSocket) -> None:
                 language = params.get("language", language)
                 notes = params.get("notes", notes)
                 report = report_from_stream_params(params, settings)
-                if report.missing_fields():
+                scenario_id = (params.get("prompt_scenario") or settings.prompt_scenario).strip()
+                scenario = get_scenario(scenario_id)
+                if scenario.requires_report and report.missing_fields():
                     logger.error(
                         "Media stream rejected call_sid=%s: %s",
                         call_sid,
                         report.format_missing_message(),
                     )
                     return
-                agent_id = (params.get("agent_id") or "").strip()
-                if not agent_id:
+                stream_agent_id = (params.get("agent_id") or "").strip()
+                if stream_agent_id:
+                    agent_id = resolve_agent_id(
+                        stream_agent_id,
+                        settings,
+                        gender=scenario.agent_gender,
+                    )
+                else:
                     session = SESSIONS.get(call_sid or "")
                     agent_id = pop_agent_for_phone(
                         session.to_phone if session else "",
                         settings,
+                        gender=scenario.agent_gender,
                     )
                 await audio_interface.handle_twilio_message(data)
                 logger.info(
-                    "Stream start call_sid=%s contact=%s language=%s plate=%s agent=%s",
+                    "Stream start call_sid=%s contact=%s language=%s scenario=%s plate=%s agent=%s",
                     call_sid,
                     contact_name,
                     language,
+                    scenario_id,
                     report.plate,
                     format_agent_label(agent_id),
                 )
@@ -191,6 +207,8 @@ async def media_stream(websocket: WebSocket) -> None:
             language=language,
             notes=notes,
             report=report,
+            scenario_id=scenario_id,
+            agent_id=agent_id,
         )
 
         def on_agent(text: str) -> None:

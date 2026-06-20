@@ -55,9 +55,9 @@ All audio flows over WebSockets — no MP3 files, no `<Gather>`/`<Play>` round-t
 | Step | Who does it | What happens |
 |------|-------------|--------------|
 | 1 | **You** run `python run_calls.py --contact Marina` | Script looks up that name in the CSV |
-| 2 | **run_calls.py** → **Twilio API** | "Please call +30…" |
-| 3 | **Twilio** | Rings the phone; when answered, POSTs to `/voice/inbound` |
-| 4 | **FastAPI** `/voice/inbound` | Looks up contact, returns TwiML: `<Connect><Stream url="wss://…/media-stream">` with contact name + language as parameters |
+| 2 | **run_calls.py** → **Twilio API** | Picks scenario + agent, embeds them in the webhook URL, asks Twilio to call |
+| 3 | **Twilio** | Rings the phone; when answered, POSTs to `/voice/inbound?prompt_scenario=…&agent_id=…` |
+| 4 | **FastAPI** `/voice/inbound` | Reads scenario/agent from the URL query string, looks up contact, returns TwiML with stream parameters |
 | 5 | **Twilio** | Opens a WebSocket to `/media-stream`; sends inbound audio as base64 μ-law 8 kHz frames |
 | 6 | **FastAPI** `/media-stream` | Connects to ElevenLabs Conversational AI WebSocket, passes audio in both directions |
 | 7 | **ElevenLabs agent** | Streams STT + LLM + TTS in real time, supports barge-in |
@@ -110,6 +110,11 @@ Per-agent voice and male/female prompt mapping lives in `app/agent_profiles.py`.
 - `prompts/worried_citizen_system.txt` — female worried-citizen persona
 - `prompts/worried_citizen_system_male.txt` — male worried-citizen persona
 - `prompts/worried_citizen_first_message.txt` — opening line
+- `prompts/cockroach_advocate_system.txt` — female urban-ecology advocate (15 s cockroach pitch)
+- `prompts/cockroach_advocate_system_male.txt` — male variant
+- `prompts/cockroach_advocate_first_message.txt` — 15 s pitch (starts immediately, no intro)
+- `prompts/birthday_wish_system.txt` — female friend calling to wish happy birthday (light flirting)
+- `prompts/birthday_wish_first_message.txt` — opening line with `{{contact_name}}`
 - `.env` → `ELEVENLABS_AGENT_LLM` (default `gemini-2.5-flash`)
 - `.env` → `REPORT_LOCATION`, `REPORT_PLATE`, `REPORT_CAR_COLOR`, `REPORT_CAR_BRAND`
 
@@ -124,6 +129,45 @@ Add these **dynamic variables** in the ElevenLabs agent dashboard (Agent → Dyn
 `contact_name`, `language`, `notes`, `report_location`, `report_plate`, `report_car_color`, `report_car_brand`
 
 Per-call values come from the CSV contact row (`language`, `notes`) plus the `REPORT_*` fields in `.env`.
+
+### Prompt scenarios
+
+Registered scenarios live in `app/prompt_scenarios.py`. Each maps to a trio of files under `prompts/`:
+
+| Scenario ID | Description | Requires parking report? |
+|-------------|-------------|--------------------------|
+| `parking_report` *(default)* | Worried citizen reporting illegal parking | Yes |
+| `cockroach_advocate` | 15 s pitch on why urban cockroaches help the ecosystem | No |
+| `birthday_wish` | Flirty birthday call from a female friend (Μαρίνα or Ελένη only) | No |
+
+Male system prompts are derived automatically (`*_male` suffix) for scenarios without a gender lock — see `app/agent_profiles.py`. `birthday_wish` sets `agent_gender=female`: only **Μαρίνα** and **Ελένη** are picked for calls and synced to ElevenLabs.
+
+**Choose a scenario when starting the server** (syncs prompts to ElevenLabs on startup):
+
+```bash
+make run SCENARIO=cockroach_advocate
+# or
+python run_server.py --scenario cockroach_advocate
+# or set in .env:
+PROMPT_SCENARIO=cockroach_advocate
+```
+
+**Choose a scenario per call** (overrides `PROMPT_SCENARIO` for that dial only):
+
+```bash
+make call SCENARIO=cockroach_advocate CONTACT=Marina
+# or
+python run_calls.py --scenario cockroach_advocate --contact Marina
+
+make call SCENARIO=birthday_wish CONTACT=Marina
+# optional personal touch via CSV notes column, e.g. "loves chocolate cake"
+```
+
+If the call scenario differs from the server's default and runtime overrides are off, `run_calls.py` re-syncs agents to that scenario before dialing.
+
+List scenarios anytime: `python run_calls.py --help` or `python run_server.py --help`.
+
+For English contacts, set `language` to `en` in the CSV row; the agent switches language per the prompt.
 
 **Advanced:** set `ELEVENLABS_USE_RUNTIME_OVERRIDES=true` only if you also enable matching override fields under Security → Overrides in the dashboard. Default is `false` — sync-on-startup is simpler.
 
@@ -226,7 +270,7 @@ One of `--contact` or `CALL_CONTACT` is required. If the name is missing or not 
 
 | Step | What happens |
 |------|----------------|
-| **`run_calls.py`** | Resolves `name` → `phone`, stashes report details and a random agent ID, tells Twilio to dial |
+| **`run_calls.py`** | Resolves `name` → `phone`, picks scenario + agent, passes them in the Twilio webhook URL, tells Twilio to dial |
 | **`/voice/inbound`** | When the callee answers, looks up the row again **by phone** to set `contact_name`, `language`, and `notes` for the ElevenLabs agent |
 
 So the `name` you pass on the CLI must match a row in `data/contacts.csv`, and that row’s `phone` must be the number you intend to ring.
@@ -242,10 +286,12 @@ You need **three terminal windows** open at the same time.
 ```bash
 cd caller_app
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8001
+python run_server.py
 ```
 
-Or `make run`. Leave it running. You should see `Uvicorn running on http://0.0.0.0:8001`. Do not use `--reload` during live calls; transcript writes under `call_logs/` can trigger reloads and interrupt the media stream.
+Or `make run`. To pick a prompt scenario: `make run SCENARIO=cockroach_advocate` or `python run_server.py --scenario cockroach_advocate`.
+
+Leave it running. You should see the bind URL and active scenario printed on startup. Do not use `--reload` during live calls; transcript writes under `call_logs/` can trigger reloads and interrupt the media stream.
 
 **Port 8000 already in use?** ComfyUI and other tools often bind `127.0.0.1:8000`. If `curl http://127.0.0.1:8000/health` does **not** return `{"status":"ok"}`, use **8001** for caller_app and ngrok instead.
 
@@ -274,9 +320,11 @@ source .venv/bin/activate
 python run_calls.py --contact Marina
 ```
 
+Or `make call CONTACT=Marina`. Add `--scenario cockroach_advocate` (or `make call SCENARIO=cockroach_advocate CONTACT=Marina`) to use a different persona for one call.
+
 `run_calls.py` checks local `/health` and `PUBLIC_BASE_URL/health` **before dialing**. If either fails, it prints what to fix instead of placing a call.
 
-Uses the `REPORT_*` defaults from `.env` for location, plate, color, and brand. **All four fields are required** — if any is missing or blank, `run_calls.py` exits without dialing.
+For the **`parking_report`** scenario, uses the `REPORT_*` defaults from `.env` for location, plate, color, and brand. **All four fields are required** — if any is missing or blank, `run_calls.py` exits without dialing. Other scenarios skip report validation.
 
 #### Reporting a car with specific details
 
@@ -453,8 +501,9 @@ The free URL changes every restart — that is why you update `PUBLIC_BASE_URL` 
 | `ELEVENLABS_AGENT_IDS` | Comma-separated agent IDs; one chosen at random per outbound call |
 | `ELEVENLABS_AGENT_LLM` | LLM model slug (default `gemini-2.5-flash`) |
 | `ELEVENLABS_AGENT_LANGUAGE` | Default agent language (default `el`) |
-| `ELEVENLABS_AGENT_PROMPT_PATH` | System prompt file (default `prompts/worried_citizen_system.txt`) |
-| `ELEVENLABS_AGENT_FIRST_MESSAGE_PATH` | First message file |
+| `PROMPT_SCENARIO` | Active prompt scenario: `parking_report` or `cockroach_advocate` (default `parking_report`) |
+| `ELEVENLABS_AGENT_PROMPT_PATH` | *(legacy)* System prompt file — scenarios in `app/prompt_scenarios.py` take precedence |
+| `ELEVENLABS_AGENT_FIRST_MESSAGE_PATH` | *(legacy)* First message file |
 | `ELEVENLABS_SYNC_AGENT_ON_STARTUP` | `true` = push prompt/LLM to ElevenLabs when API starts |
 | `ELEVENLABS_USE_RUNTIME_OVERRIDES` | `true` = per-call overrides (requires dashboard Overrides enabled) |
 | `REPORT_LOCATION` / `REPORT_PLATE` / `REPORT_CAR_COLOR` / `REPORT_CAR_BRAND` | Parking report details for the persona (`REPORT_PLATE` uses Greek capitals, e.g. `ΙΗΧ9037`) |
@@ -481,6 +530,8 @@ See `.env.example` for the full list.
    - Is ngrok running, and does `PUBLIC_BASE_URL` match its **full** current URL?
    - Is `ELEVENLABS_AGENT_IDS` (or `ELEVENLABS_AGENT_ID`) set? The app transcodes between Twilio μ-law 8 kHz and the agent's PCM 16 kHz audio. If you manually change agent audio formats, update `app/twilio_audio_interface.py` too.
    - Are Twilio credentials API-key style (`TWILIO_API_KEY_SID` + secret) or auth-token style — not mixed up?
+   - **Silent call (connects but no voice)?** Check `call_logs/call_<CallSid>.log` or the ElevenLabs dashboard. Error **3000** (`Agent … is unsafe`) means content moderation blocked the prompt — soften `prompts/`, run `make sync-agent SCENARIO=…`, retry.
+   - **Wrong scenario on a `--scenario` call?** Restart the API server after code changes. `run_calls.py` and uvicorn are separate processes — scenario/agent travel in the webhook URL query string (`app/outbound_context.py`), not shared memory.
 5. After renaming or moving this project folder, run `make clean && make setup` to rebuild `.venv` (venv paths are absolute).
 
 ---
@@ -490,12 +541,13 @@ See `.env.example` for the full list.
 | If you want to change… | Open… |
 |------------------------|-------|
 | Random agent pool per call | `app/agent_context.py`, `app/agent_profiles.py`, `ELEVENLABS_AGENT_IDS` in `.env` |
-| Agent persona, LLM, parking report details | `prompts/worried_citizen_*.txt`, `.env`, `app/agent_config.py` |
-| Push agent config to ElevenLabs | `sync_agent.py`, `make sync-agent` |
+| Prompt scenarios (registry + selection) | `app/prompt_scenarios.py`, `run_server.py`, `run_calls.py --scenario`, `PROMPT_SCENARIO` in `.env` |
+| Agent persona, LLM, parking report details | `prompts/`, `app/agent_config.py`, `REPORT_*` in `.env` |
+| Push agent config to ElevenLabs | `sync_agent.py`, `make sync-agent`, `make sync-agent SCENARIO=…` |
 | Call transcripts / costs | `call_logs/call_<CallSid>.log`, `app/call_log.py`, `app/call_costs.py` |
 | Webhook + WebSocket flow | `app/main.py` |
 | Audio bridging (Twilio ↔ ElevenLabs) | `app/twilio_audio_interface.py` |
-| How calls are started / canceled | `run_calls.py`, `app/twilio_client.py` |
+| How calls are started / canceled | `run_calls.py`, `app/outbound_context.py`, `app/twilio_client.py` |
 | Contact / call schedule logic | `app/csv_store.py` |
 | Settings and env vars | `app/config.py`, `.env.example` |
 

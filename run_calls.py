@@ -3,13 +3,16 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from app.agent_context import pick_random_agent_id, stash_agent_for_phone
+from app.agent_context import pick_random_agent_id
 from app.agent_profiles import format_agent_label
+from app.agent_config import sync_agent_from_settings
 from app.call_costs import build_call_cost_summary, wait_for_twilio_call_final
 from app.config import get_settings
+from app.outbound_context import build_voice_webhook_url
 from app.preflight import check_call_server_ready
 from app.csv_store import ContactSelectionError, resolve_contact_to_call
-from app.report_context import CallReportDetails, stash_report_for_phone
+from app.prompt_scenarios import format_scenario_choices, get_scenario, scenario_ids
+from app.report_context import CallReportDetails
 from app.twilio_client import (
     TERMINAL_CALL_STATUSES,
     get_twilio_client,
@@ -24,11 +27,19 @@ def _parse_args() -> argparse.Namespace:
     defaults = CallReportDetails.from_settings(settings)
     parser = argparse.ArgumentParser(
         description="Place an outbound call to the active contact in the CSV.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Available scenarios:\n" + format_scenario_choices(),
     )
     parser.add_argument(
         "--contact",
         default=None,
         help="Contact name from CSV (default: CALL_CONTACT in .env)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=scenario_ids(),
+        default=None,
+        help=f"Prompt scenario for this call (default: PROMPT_SCENARIO in .env, currently {settings.prompt_scenario!r})",
     )
     parser.add_argument(
         "--location",
@@ -122,12 +133,14 @@ def _print_post_call_summary(
 def main() -> None:
     args = _parse_args()
     settings = get_settings()
+    scenario = get_scenario(args.scenario or settings.prompt_scenario)
     report = _resolve_report(args, settings)
-    missing = report.missing_fields()
-    if missing:
-        print("Cannot place calls.")
-        print(report.format_missing_message())
-        raise SystemExit(1)
+    if scenario.requires_report:
+        missing = report.missing_fields()
+        if missing:
+            print("Cannot place calls.")
+            print(report.format_missing_message())
+            raise SystemExit(1)
 
     contact_name = (args.contact or settings.call_contact or "").strip() or None
     try:
@@ -144,18 +157,35 @@ def main() -> None:
         raise SystemExit(1)
 
     client = get_twilio_client(settings)
-    webhook_url = f"{settings.public_base_url.rstrip('/')}/voice/inbound"
 
-    print("Report details for this run:")
-    print(f"  location: {report.location}")
-    print(f"  plate:    {report.plate}")
-    print(f"  color:    {report.car_color}")
-    print(f"  brand:    {report.car_brand}")
+    print(f"Prompt scenario: {scenario.id} — {scenario.description}")
+    if scenario.agent_gender:
+        print(f"Agent pool: {scenario.agent_gender} only")
+    if scenario.requires_report:
+        print("Report details for this run:")
+        print(f"  location: {report.location}")
+        print(f"  plate:    {report.plate}")
+        print(f"  color:    {report.car_color}")
+        print(f"  brand:    {report.car_brand}")
     print(f"\nCalling {contact.name} ({contact.phone})...")
 
-    agent_id = pick_random_agent_id(settings)
-    stash_report_for_phone(contact.phone, report)
-    stash_agent_for_phone(contact.phone, agent_id)
+    if (
+        scenario.id != settings.prompt_scenario
+        and not settings.elevenlabs_use_runtime_overrides
+    ):
+        print(
+            f"Syncing ElevenLabs agents to scenario {scenario.id!r} "
+            f"(server default is {settings.prompt_scenario!r})..."
+        )
+        sync_agent_from_settings(settings, scenario.id, force=True)
+
+    agent_id = pick_random_agent_id(settings, gender=scenario.agent_gender)
+    webhook_url = build_voice_webhook_url(
+        settings,
+        scenario=scenario,
+        agent_id=agent_id,
+        report=report,
+    )
     answer_timeout = ring_timeout_seconds(settings)
     call = client.calls.create(
         to=contact.phone,
